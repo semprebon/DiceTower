@@ -42,6 +42,8 @@ STAIR_HEIGHT = CHAMBER_HEIGHT;
 WALL_WIDTH = 2*RADIUS*sin(180/SIDES);   // Side length of polygon defining outer walls
 TOP_GAP = CLEARANCE;    // Gap between top of steps and turret
 
+$FN = 60;
+
 /*******************************
     SUPPORT FUNCTIONS/MODULES
 *******************************/
@@ -62,7 +64,7 @@ function associate(values) =
  */
 function get(assoc, key, default=undef) =
     let (p = [ for (pair = assoc) if (pair[0] == key) pair[1] ])
-    (p == undef) ? default : p[0];
+    (p[0] == undef) ? default : p[0];
 
 /*
     Merge two associations, giving the second preference
@@ -75,6 +77,16 @@ function merge_associations(a, b) = concat(b,a);
 function distribute(extent=22, size=4.5, count=2, margin=0) =
     let(spacing = (extent - count*size) / (count-1 + 2*margin))
     spacing;
+
+/*
+    Compute the apothem of a regular polygon with given circumscribed radius and sides
+*/
+function apothem(r, n) = r*cos(180/n);
+
+/*
+    Compute the side length of a regular polygon with given circumscribed radius and sides
+*/
+function chord(r,n) = 2 * r * sin(180/n);
 
 /*
     Create a polygonal prism with given circumscribed radius and one side parallel to X axis
@@ -164,26 +176,27 @@ function define_tower(h=HEIGHT, r=RADIUS, sides=SIDES, center_radius=0, entrance
     angle - angle of offset of entry hole
  */
 function define_entrance(type="funnel", h=ENTRANCE_HEIGHT, extension=5,
-        crenulation_count=3, crenulation_height=3,
+        crenulation_count=3, crenulation_height=3, circular, wall_height=0,
         relative_offset=0, relative_size=0.5, angle=0, sacrificial_floor=true,
-        support_count=0, support_angle_0=0, support_angle_delta=undef)
+        support_count=0, support_angle_0, support_angle_delta, support_type)
     = associate(["type", type, "h", h, "extension", extension,
-        "crenulation_count", crenulation_count, "crenulation_height", crenulation_height,
+        "crenulation_count", crenulation_count, "crenulation_height", crenulation_height, "circular", circular,
+        "wall_height", wall_height,
         "relative_offset", relative_offset, "relative_size", relative_size, "angle", angle,
-        "sacrificial_floor", sacrificial_floor,
+        "sacrificial_floor", sacrificial_floor, "support_type", support_type,
         "support_count", support_count, "support_angle_0", support_angle_0, "support_angle_delta", support_angle_delta]);
 
 function define_exit(type="circular", h=EXIT_RAMP_HEIGHT, steps=10, angle=undef, top_radius=CLEARANCE/2,
-        outer_inset=CLEARANCE/2)
+        outer_inset=CLEARANCE/2, relative_offset=1)
     = associate(["type", type, "h", h, "steps", steps, "angle", angle, "top_radius", top_radius,
-        "outer_inset", outer_inset]);
+        "outer_inset", outer_inset, "relative_offset", relative_offset]);
 
-function define_interruptor_baffle(levels=3, zmin=ENTRANCE_HEIGHT+CLEARANCE, zmax=CHAMBER_HEIGHT-CLEARANCE,
-        count_per_level=undef, tiers=2)
+function define_interrupter_baffle(levels=3, zmin=ENTRANCE_HEIGHT+CLEARANCE, zmax=CHAMBER_HEIGHT-CLEARANCE,
+        count_per_level=undef, tiers=2, column_radius=0, top_gap=0)
     = associate(["type", "interrupter", "levels", levels, "zmin", zmin, "zmax", zmax, "tiers", tiers,
-        "count_per_level"]);
+        "count_per_level", count_per_level, "column_radius", column_radius, "top_gap", top_gap,]);
 
-function define_baffle(type="interruptor", column_radius=0, options=[])
+function define_baffle(type="interrupter", column_radius=0, options=[])
     = associate(["type",type, "column_radius", column_radius]);
 
 function define_stairway_baffle(column_radius=INNER_RADIUS, rotation=360, step_thickness=STEP_THICKNESS,
@@ -241,6 +254,18 @@ module arched_support(width) {
     }
 }
 
+module basic_support(width) {
+    height = width;
+    thickness = WALL_THICKNESS;
+    rotate([90,0,0]) linear_extrude(thickness, center=true) {
+        translate([width, 0]) polygon([[0,0],[width,-height],[width,0]]);
+    }
+}
+
+module bar_support(radius) {
+    translate([0,-WALL_THICKNESS/2,-WALL_THICKNESS]) cube([radius, WALL_THICKNESS,WALL_THICKNESS]);
+}
+
 /*
     Create the entrance floor support
  */
@@ -258,13 +283,21 @@ module arched_support(width) {
 module create_entrance_supports(tower) {
     entrance = get(tower,"entrance");
     radius = get(tower,"r");
+    sides = get(tower,"sides");
     count = get(entrance,"support_count");
-    angle_0 = get(entrance,"support_angle_0");
-    angle_delta = get(entrance,"support_angle_delta");
+    angle_0 = get(entrance,"support_angle_0", 180/sides);
+    angle_delta = get(entrance,"support_angle_delta", 360/sides);
+    type = get(entrance,"support_type","bar");
+    hole_radius = get(entrance, "relative_size") * radius;
+
+    echo("create_entrance_supports:", count=count, type=type, angle_0=angle_0);
     if (count> 0) {
         for (i = range_upto(count)) {
-            rotate([0,0,angle_0 + i*angle_delta]) translate([0,-WALL_THICKNESS/2,-WALL_THICKNESS])
-                cube([radius, WALL_THICKNESS,WALL_THICKNESS]);
+            rotate([0,0,angle_0 + i*angle_delta]) {
+                if (type == "bar") bar(support(radius));
+                else if (type == "basic") basic_support(radius - hole_radius - WALL_THICKNESS/2);
+                else echo("Invalid support type:", type);
+            }
         }
     }
 }
@@ -286,6 +319,7 @@ module create_entrance_walls(tower) {
     height = get(entrance, "h");
     extension = get(entrance, "extension");
     crenulation_height = get(entrance, "crenulation_height");
+    wall_height = get(entrance,"wall_height",0);
     sides = get(tower,"sides");
     cren_num = 3;
     wall_width = get(tower, "outer_wall_width");
@@ -310,7 +344,7 @@ module create_entrance_walls(tower) {
     //echo("create_entrance_walls", wall_gaps=wall_gaps);
     echo("create_entrance_walls", height=height, extension=extension, net=height-extension);
     translate([0,0,extension]) {
-        tower_sides(tower, height=height-extension, radius=radius+extension, width=entrance_width,
+        tower_sides(tower, height=height-extension+wall_height, radius=radius+extension, width=entrance_width,
             windows=wall_gaps);
     }
 }
@@ -321,10 +355,12 @@ module create_entrance_funnel(tower) {
     height = get(entrance, "h");
     radius = get(tower,"r");
     sides = get(tower,"sides");
+    circular = get(entrance,"circular", true);
     extension = get(entrance, "extension");
     angle = get(entrance, "angle");
     min_hole_thickness = 0.8;
     floor_height = height - extension;
+    wall_height = get(entrance,"wall_height", 0);
     stairway_width = radius - get(tower, "center_radius");
     thickness = WALL_THICKNESS*1.1;
     extension_radius = radius + extension - thickness;
@@ -339,10 +375,10 @@ module create_entrance_funnel(tower) {
             h1=extension, h2=floor_height, sides=sides);
         translate([0,0,min_hole_thickness]) {
             polygon_pyramid(h=floor_height-min_hole_thickness, r1=hole_radius,
-            r2=extension_radius, sides=sides, center=-hole_offset);
+                r2=extension_radius, sides=sides, center=-hole_offset);
         }
         translate(scaled_hole_offset + [0,0,hole_z_offset]) {
-            cylinder(r=hole_radius, h=floor_height*2, $fn=30);
+            rotate([0,0,180/sides]) cylinder(r=hole_radius, h=floor_height*2, $fn=circular ? 30 : sides);
         }
     }
 }
@@ -360,7 +396,9 @@ module create_entrance(tower=undef) {
             create_entrance_funnel(tower);
             create_entrance_walls(tower);
         }
-        entrance_brick_cutter(tower);
+        if (extension > 0) {
+            entrance_brick_cutter(tower);
+        }
     }
 }
 
@@ -498,11 +536,12 @@ module create_dice_door_slot(tower, side) {
     angle = side * 360/get(tower,"sides");
     min_radius = get(tower,"outer_wall_width")/2 * (2/sqrt(2) + 1);
     width = get(tower,"inner_wall_width");
-    x_offset = min_radius - WALL_THICKNESS*2;
+    x_offset2 = min_radius - WALL_THICKNESS*2;
+    x_offset = apothem(get(tower,"r"),get(tower,"sides")) - 2*WALL_THICKNESS;
+    echo("create_dice_door_slot:", min_radius=min_radius, x_offset=x_offset);
 
     // slot for door panel
     #rotate([0,0,angle]) translate([x_offset,-width/2,-WALL_THICKNESS]) cube([WALL_THICKNESS,width,WALL_THICKNESS]);
-
 }
 
 /*
@@ -536,7 +575,7 @@ function opening_position(wall_size, window) =
     let(pos = get(window,"position"))
     [0, wall_size.x*(pos.x+1)/2, wall_size.y*(pos.y+1)/2];
 
-/*
+/* todo:
     Process the specified operation for all openings
  */
 module position_openings(wall_size, windows, operation="CUT") {
@@ -591,6 +630,14 @@ module brick_cutter(height, width, depth=0.4, margin=NOMINAL_BRICK_SIZE.x/2) {
     }
 }
 
+module brick_texture_plane(r_offset, angle=0, height, width) {
+    difference() {
+        children(0);
+        children([1:($children-1)]);
+        rotate([0,0,angle]) translate([r_offset,0,0]) brick_cutter(height, width, depth=0.4, margin=0.4);
+    }
+}
+
 /*
     Create a wall with openings and texture
  */
@@ -605,11 +652,15 @@ module wall(height, width, windows) {
             position_openings([width, height], sized_windows, operation="PRECUT");
         }
 
-        difference() {
+        brick_texture_plane(r_offset=WALL_THICKNESS, height=height, width=width) {
             cube([WALL_THICKNESS, width, height]);
             if (sized_windows != undef) position_openings([width, height], sized_windows, operation="CUT");
-            translate([WALL_THICKNESS,0,0]) brick_cutter(height, width, depth=0.4, margin=0.4);
         }
+//        difference() {
+//            cube([WALL_THICKNESS, width, height]);
+//            if (sized_windows != undef) position_openings([width, height], sized_windows, operation="CUT");
+//            translate([WALL_THICKNESS,0,0]) brick_cutter(height, width, depth=0.4, margin=0.4);
+//        }
 
         if (sized_windows != undef) position_openings([width, height], sized_windows, operation="ADD");
     }
@@ -656,6 +707,7 @@ module tower_sides(tower, height, width, radius, sides, windows) {
 /*************************
     EXIT
 *************************/
+
 module slice_exit_ramp(tower) {
     exit = get(tower,"exit");
     echo("slice_exit_ramp:",exit=exit);
@@ -691,46 +743,74 @@ module turned_steps(tower) {
 
 }
 
+/*
+    Create a stepped cone with bottom radius r0, top radius r2, heigth h, and
+    a specified number of steps.
+ */
+module stepped_cone(r0, r1, h, steps, $fn=60) {
+    dh = h / steps;
+    dr = (r1 -r0) / steps;
+    for (i = range_upto(steps)) {
+        rotate  ([0,0,180/$fn]) cylinder(r = r0 + i*dr, h = (i+1)*dh, $fn=$fn);
+    }
+}
+
 module circular_exit_ramp(tower) {
     exit = get(tower,"exit");
     height = get(exit, "h");
     r = get(tower,"r");
     steps = get(exit,"steps");
+    sides = get(tower,"sides");
+    r_offset = get(exit,"relative_offset") * r;
+//    d = 2*r;
     rise = height/steps;
-    r0 = get(tower, "inner_wall_width")/2;
-    tread = (2*r-r0) / steps;
+    tread = 2*r / (steps + 2);
+    //r0 = get(tower, "inner_wall_width")/2;
+    r_max = r_offset + r - tread;
+    r_min = r_offset - apothem(r,sides) + tread;
+    //r0 = d-tread;
+
+
+    //tread = (2*r - r0) / steps;
+
     difference() {
         cylinder(r=r, h=height);
-        for (i=range_upto(steps)) {
-            translate([r,0,i*rise]) cylinder(r=r0+i*tread, h=(i+1)*rise);
-        }
+//        translate([r,0,height]) mirror([0,0,1]) stepped_cone(r0=2*r, r1=r0*(steps-1)/steps, h=height, steps=steps,
+//            $fn=get(tower,"sides"));
+        echo(r_offset=r_offset)
+        translate([r_offset,0,height]) mirror([0,0,1]) stepped_cone(r0=r_max, r1=r_min, h=height, steps=steps);
     }
 }
 
 /*
     Create interrputer
  */
-module interruptor(length, count) {
-    translate([0,0,WALL_THICKNESS/2]) cube([length, WALL_THICKNESS, WALL_THICKNESS], center=true);
+module interrupter(length, count) {
+    d_angle = 360 / count;
+    for (i = range_upto(count)) rotate([0,0,i*d_angle])
+        translate([length/2,0,WALL_THICKNESS/2]) cube([length, WALL_THICKNESS, WALL_THICKNESS], center=true);
     //translate([0,0,WALL_THICKNESS]) cube([WALL_THICKNESS, 2*RADIUS, WALL_THICKNESS], center=true);
 }
 
 /*
-    Create interrupters
+    Create interrepters
  */
-module create_interruptor_baffle(tower) {
+module create_interrupter_baffle(tower) {
     baffle = get(tower,"baffle");
     stages = get(baffle,"tiers") - 1;
     zmin = get(baffle,"zmin", get(get(tower, "exit"), "h") + CLEARANCE);
     zmax = get(baffle,"zmax", get(tower, "chamber_height") - CLEARANCE);
     dz = (zmax - zmin) / stages;
-    angle_between_interruptors = 720/get(tower,"sides");
-    angle_0 = 0;
-    d_angle = angle_between_interruptors / 2;
-    echo("create_interruptor_baffle:", stages=stages, zmin=zmin, zmax=zmax);
+    angle_between_interrupters = 720/get(tower,"sides");
+    angle_0 = 180/get(tower,"sides");
+    d_angle = angle_between_interrupters / 2;
+    length = get(tower,"r") - WALL_THICKNESS/2;
+    echo("create_interrupter_baffle:", stages=stages, zmin=zmin, zmax=zmax,
+        angle_between_interrupters=angle_between_interrupters, d_angle=d_angle,
+    count_per_level=get(baffle,"count_per_level"));
     for (i = range_upto(stages)) {
         rotate(angle_0 + i*d_angle) translate([0,0,zmin+i*dz]) {
-            interruptor(2*get(tower,"r"), get(baffle,"count_per_level"));
+            interrupter(length, get(baffle,"count_per_level"));
         }
     }
 
@@ -808,8 +888,8 @@ module create_baffle(tower, height) {
     sides = get(tower,"sides");
     if (get(baffle, "type") == "stairway") {
         create_stairway_baffle(tower, height);
-    } else if (get(baffle,"type") == "interruptor") {
-        create_interruptor_baffle(tower);
+    } else if (get(baffle,"type") == "interrupter") {
+        create_interrupter_baffle(tower);
     } else if (get(baffle,"type") == "open") {
         ;
     } else {
@@ -833,11 +913,13 @@ module tower_interior(tower) {
     inner_radius = get(tower, "center_radius");
     entrance = get(tower, "entrance");
     baffle = get(tower, "baffle");
+    echo(baffle=baffle);
     column_radius = get(baffle,"column_radius");
     exit = get(tower,"exit");
     exit_ramp_height = get(exit,"h");
     entrance_support_count = get(entrance, "entrance_support_count");
     windows = get(tower,"windows");
+    top_gap = get(baffle,"top_gap",0);
 
     // floor
     difference() {
@@ -850,24 +932,24 @@ module tower_interior(tower) {
     intersection() {
         union() {
             // entrance supports
-            translate([0,0,chamber_height]) create_entrance_supports(tower);
+            #translate([0,0,chamber_height]) create_entrance_supports(tower);
 
             // stairs/baffle
             translate([0,0,exit_ramp_height]) {
-                create_baffle(tower, chamber_height - get(exit, "h"));
+                #create_baffle(tower, chamber_height - get(exit, "h"));
             }
 
             echo("tower_interior:", exit_ramp_height=exit_ramp_height);
             // exit ramp
             if (exit_ramp_height != 0) {
-                if (get(exit,"type") == "circular") circular_exit(tower);
+                if (get(exit,"type") == "circular") circular_exit_ramp(tower);
                 else if (get(exit,"type") == "slice") slice_exit_ramp(tower);
                 else echo("tower_interior: Invalid parameter", type=get(exit,"type"));
             }
 
             // column
             if (column_radius > 0) {
-                cylinder(r=column_radius, h=chamber_height, $fn=60);
+                cylinder(r=column_radius, h=chamber_height-top_gap, $fn=60);
             }
         }
         polygon_prism(h=chamber_height, r=radius-WALL_THICKNESS/2, sides=sides);
@@ -969,34 +1051,150 @@ module create_tower(tower) {
     translate([0,0,get(tower,"chamber_height")]) create_entrance(tower);
 }
 
-module oval_prism(r, h, d, sides) {
-    a = 180/sides;
-    hull() {
-        rotate([0,0,a]) cylinder(r=r, h=h, $fn=sides);
-        if (d > 0) translate([d,0,0]) rotate([0,0,a]) cylinder(r=r, h=h, $fn=sides);
+module gate(size) {
+    echo("gate:", size=size);
+    door_size = size -4*WALL_THICKNESS*[2, 2];
+    union() {
+        linear_extrude(height=2*WALL_THICKNESS, center=false) {
+            difference() {
+                arch(size);
+                translate([0,WALL_THICKNESS]) arch(door_size);
+            }
+        }
+        bar_radius = WALL_THICKNESS*0.75;
+        separation = (door_size.x - 4*2*bar_radius) / 5;
+        dx = 2*bar_radius + separation;
+        x0 = -door_size.x/2 + separation * bar_radius;
+        rotate([-90,0,0]) for (i=range_upto(4)) {
+            h = size.y*0.65;
+            translate([x0+i*dx,-WALL_THICKNESS,0]) cylinder(r=bar_radius,h=h,$fn=12);
+        }
     }
 }
+
+module oval_prism(r, h, l, sides, sides2) {
+    d = is_undef(l) ? 0 : l - 2*apothem(r, sides) + WALL_THICKNESS;
+    _sides2 = is_undef(sides2) ? sides : sides2;
+    a = 180/sides;
+    a2 = 180/_sides2;
+    echo("oval_prism:", d=d)
+    translate([-d/2,0,0]) hull() {
+        rotate([0,0,a]) cylinder(r=r, h=h, $fn=sides);
+        if (d > 0) translate([d,0,0]) rotate([0,0,a2]) cylinder(r=r, h=h, $fn=_sides2);
+    }
+}
+
+module coffin_base(r, h, l, sides) {
+    a = 180/sides;
+    width = chord(r,sides);
+    y_offset = h*tan(360/sides);
+    width_at_height = width + 2*y_offset;
+    echo(h=h, y_offset=y_offset, r=r,l=l,width_at_height=width_at_height);
+    r_min = apothem(r,sides);
+    l2 = l - r_min;
+    hull() {
+        translate([apothem(r,sides)-l/2,0,0]) rotate([0,0,a]) cylinder(r=r, h=h, $fn=sides);
+        #translate([0,0,h/2]) cube([l,width_at_height,h], center=true);
+    }
+}
+
+module base(type, r, h, l, sides) {
+    if (type == "coffin") coffin_base(r,h,l,sides);
+    else if (type == "oval") oval_prism(r,h,l,sides);
+    else echo("Invalid base type:", type=type);
+}
+
 /*
-    Create tray
+    Create enclosing tray
  */
-module create_tray(tower, length, h=15) {
+module create_enclosing_tray(tower, length, h=15, back_door=false, type="coffin", gate=false) {
     r = get(tower,"r");
     sides = get(tower,"sides");
-    wall_width = get(tower,"outer_wall_width") + 3*WALL_THICKNESS;
+    tower_wall_width = get(tower,"outer_wall_width");
+    wall_width = tower_wall_width + 3*WALL_THICKNESS;
     r0 = r + TOLERANCE;
     r1 = r0 + WALL_THICKNESS;
-    separation = length - r1;
+    separation = length - 2*apothem(r0, sides);
+    l0 = 2*r0 + separation;
+    echo("create_tray:",r0=r0,r1=r1);
 
+    //%cube([length,r0,r0], center=true);
     difference() {
-        oval_prism(r=r1, h=h, sides=sides, d=separation);
-        translate([0,0, 2*LAYER_HEIGHT]) oval_prism(r=r0, h=h, sides=sides, d=separation);
+        //oval_prism(r=r1, h=h, sides=sides, sides2=8, d=separation);
+        base(type, r=r1, h=h, sides=sides, l=length+2*WALL_THICKNESS);
+        //#translate([0,0,2*LAYER_HEIGHT]) base(type, r=r0, h=h, sides=sides, l=length);
+        x_offset = apothem(r0,sides);
+        translate([-length/2,0,x_offset+WALL_THICKNESS]) rotate([0,90,0])
+            polygon_prism(r=r0, h=length, sides=sides);
+        translate([-(length/2)+apothem(r0,sides),0,WALL_THICKNESS]) polygon_prism(r=r0, h=length-2*WALL_THICKNESS, sides=sides);
+//        #translate([length/2,-wall_width/2,0]) cube([WALL_THICKNESS, wall_width, h]);
+        if (back_door) {
+            translate([-apothem(r1, sides),-tower_wall_width/2,WALL_THICKNESS]) cube([WALL_THICKNESS,tower_wall_width,h]);
+        }
+
+    }
+    if (gate) {
+        translate([length/2-WALL_THICKNESS/2,0,0]) rotate([90,0,90]) {
+            gate([wall_width, 2*apothem(r,sides)]);
+        }
     }
 
+//    difference() {
+//        oval_prism(r=r1, h=h, sides=sides, d=0);
+//        translate([0,0, 2*LAYER_HEIGHT]) {
+//            oval_prism(r = r0, h = h, sides = sides, d = 0);
+//            translate([apothem(r0,sides), -wall_width/2, 0]) cube([WALL_THICKNESS, wall_width, h]);
+//            translate([-apothem(r1, sides),-tower_wall_width/2,WALL_THICKNESS]) cube([WALL_THICKNESS,tower_wall_width,h]);
+//        }
+//    }
+
+
+}
+
+/*
+    Create simple tray
+ */
+module create_simple_tray(tower, length, h=15, back_door=true, type="oval", gate=false) {
+    r = get(tower,"r");
+    sides = get(tower,"sides");
+    tower_wall_width = get(tower,"outer_wall_width");
+    wall_width = tower_wall_width + 3*WALL_THICKNESS;
+    r0 = r + TOLERANCE;
+    r1 = r0 + WALL_THICKNESS;
+    separation = length - 2*apothem(r0, sides);
+    l0 = 2*r0 + separation;
+    echo("create_tray:",r0=r0,r1=r1);
+
+    //%cube([length,r0,r0], center=true);
     difference() {
-        oval_prism(r=r1, h=h, sides=sides, d=0);
+        base(type, r=r1, h=h, sides=sides, l=length+2*WALL_THICKNESS);
+        translate([0,0,WALL_THICKNESS]) base(type, r=r0, h=h, sides=sides, l=length);
+        x_offset = apothem(r0,sides);
+        translate([-(length/2)+apothem(r0,sides),0,WALL_THICKNESS]) polygon_prism(r=r0, h=length-2*WALL_THICKNESS, sides=sides);
+
+        // gate opening
+        if (gate) {
+            translate([(length+WALL_THICKNESS)/2,-wall_width/2,0]) cube([WALL_THICKNESS, wall_width, h]);
+        }
+
+        // backdoor opening
+        if (back_door) {
+            translate([-length/2-1.5*WALL_THICKNESS,-tower_wall_width/2,WALL_THICKNESS]) cube([WALL_THICKNESS,tower_wall_width,h]);
+        }
+
+    }
+    if (gate) {
+        translate([(length-WALL_THICKNESS)/2,0,0]) rotate([90,0,90]) {
+            gate([wall_width, 2*apothem(r,sides)]);
+        }
+    }
+
+    translate([apothem(r1,sides)-length/2-1.5*WALL_THICKNESS,0,0]) difference() {
+        oval_prism(r=r1, h=h, sides=sides);
         translate([0,0, 2*LAYER_HEIGHT]) {
-            oval_prism(r = r0, h = h, sides = sides, d = 0);
-            translate([r - 2 * WALL_THICKNESS, - wall_width / 2, 0]) cube([WALL_THICKNESS, wall_width, h]);
+            oval_prism(r=r0, h=h, sides=sides);
+            translate([apothem(r0,sides), -wall_width/2, 0]) cube([WALL_THICKNESS, wall_width, h]);
+            translate([-apothem(r1, sides),-tower_wall_width/2,WALL_THICKNESS]) cube([WALL_THICKNESS,tower_wall_width,h]);
         }
     }
 
@@ -1010,21 +1208,22 @@ module half_plane(axis, max) {
     translate(max*axis) cube([2*max,2*max,2*max], center=true);
 }
 
-module exit_test_model(tower) {
+module exit_test_model(tower, angle, x_offset, z_offset, slice=true) {
     r = get(tower,"r");
     h = get(tower,"h");
     sides = get(tower,"sides");
     exit = get(tower,"exit");
-    angle = 180/sides;
-    x_offset = -WALL_THICKNESS/sin(angle/2);
+    _angle = is_undef(angle) ? 180/sides : angle;
+    _x_offset = is_undef(x_offset) ? -WALL_THICKNESS/sin(_angle/2) : x_offset;
+    _z_offset = is_undef(z_offset) ? get(tower,"outer_wall_width")*1.5 : z_offset;
     difference() {
-        //create_tower(tower);
-        tower_sides(tower);
-        translate([x_offset,0,0]) {
-            rotate([0, 0, -angle]) half_plane([0,-1,0], h);
-            rotate([0, 0, angle]) half_plane([0,1,0], h);
+        children();
+        //tower_sides(tower);
+        if (slice) translate([_x_offset,0,0]) {
+            rotate([0, 0, -_angle]) half_plane([0,-1,0], h);
+            rotate([0, 0, _angle]) half_plane([0,1,0], h);
         }
-        translate([0,0,get(tower,"outer_wall_width")*1.5]) half_plane([0,0,1], h);
+        translate([0,0,_z_offset]) half_plane([0,0,1], h);
     }
 }
 
@@ -1047,6 +1246,22 @@ module dice_door_test_model(tower, z_cut=60) {
     }
 }
 
+phi=0.5*(sqrt(5)+1); // golden ratio
+
+// create an icosahedron by intersecting 3 orthogonal golden-ratio rectangles
+module icosahedron(edge_length) {
+    st=0.0001;  // microscopic sheet thickness
+    hull() {
+        cube([edge_length*phi, edge_length, st], true);
+        rotate([90,90,0]) cube([edge_length*phi, edge_length, st], true);
+        rotate([90,0,90]) cube([edge_length*phi, edge_length, st], true);
+    }
+}
+
+module d20() {
+    translate([0,0,13*phi/2]) icosahedron(13);
+}
+
 echo("********************* STARTING RUN ********************************");
 //tower_entrance = define_entrance(type="funnel", entrance_support_height=0);
 //tower = define_tower(h=120, r=40, sides=8, entrance=tower_entrance, center_radius=8);
@@ -1058,7 +1273,7 @@ echo("********************* STARTING RUN ********************************");
 //original_tower();
 // zmin = 50, zmax = 115
 
-watchtower_openings = arrange_openings(tiers=3, sides=8,
+watchtower_openings = arrange_openings(tiers=3, sides=8, y0=-1.2,
         functors = [
             define_door(sides=[0], size=[0.8,1.6]),
             define_door(sides=[4], size=[0.8,1.6], type="S"),
@@ -1075,11 +1290,17 @@ watch_tower = define_tower(h=165, r=40, sides=8, center_radius=4,
         baffle = define_stairway_baffle(column_radius=4, step_thickness=5.5, step_riser=5, rotation=180,
                 top_gap=20),
         windows = watchtower_openings);
+
+//create_tower(watch_tower);
+create_simple_tray(tower=watch_tower, length=165, h=30, back_door=true);
+//back_door_panel(watch_tower, [1.8, 26.3, 69]);
+//exit_test_model(watch_tower);
+
 /*
 r2/r1 = extension_radius/hole_radiu = 45.8/16 = 229/80 ~ 229/80 = 2*3*19/16*5
 actual scale factor = ~1.87 = 187/100 = 911*17/100
 hole_radius = rel_hol_w * starway+size =0.4*32=12.8
-21
+
 
 relative_size=0.5 r2/r1 = 45.8/16 scale =  ~1.87 = 187/100 = 11*17/100
 relative_size=0.4 r2/r1 = 45.8/12.8 scale = 83/32
@@ -1092,29 +1313,49 @@ rel_offset = 0.4, h6ole_offset = [12.8, 0, 0], scaled_hole_offset = [15.36, 0, 0
 rel_offset = 0.5, hole_offset = [16, 0, 0], scaled_hole_offset = [19.2, 0, 0] obs~29  err ~
 rel_offset = 1, hole_offset = [32, 0, 0], scaled_hole_offset = [38.4, 0, 0]
  */
-simple_tower = define_tower(h=100, r=30, sides=6, center_radius=0,
-    entrance=define_entrance(type="funnel", extension=0,
-        relative_size=0.5, h=10),
-    exit = define_exit(type="circular", steps=8),
-    baffle = define_interruptor_baffle(tiers=3, zmin=59.5, zmax=107),
-    windows = simple_openings(sizes=[[0.9,1.4], /* door */, [0.33,0.66]], sides=6));
+//simple_tower = define_tower(h=100, r=30, sides=6, center_radius=0,
+//    entrance=define_entrance(type="funnel", extension=0,
+//        relative_size=0.5, h=10),
+//    exit = define_exit(type="circular", steps=8),
+//    baffle = define_interrupter_baffle(tiers=3, zmin=59.5, zmax=107),
+//    windows = simple_openings(sizes=[[0.9,1.4], /* door */, [0.33,0.66]], sides=6));
 
 portable_tower = define_tower(h=120, r=30, sides=6, center_radius=0,
-    entrance=define_entrance(type="funnel", extension=0,
+    entrance=define_entrance(type="funnel", extension=0, support_type="basic", support_count=6,
         relative_size=0.5, h=10),
     exit = define_exit(type="circular", steps=8),
-    baffle = define_interruptor_baffle(tiers=3, zmin=59.5, zmax=107),
+    baffle = define_interrupter_baffle(tiers=3, zmin=59.5, zmax=107),
     windows = renessance_openings(sizes=[[0.9,1.4], /* door */, [0.21,0.75]],
         sides=6, floors=4, dx=0.65, dy=0.43, y0 = -0.3));
-//    windows = just_a_door([0.8,1.0]));
 
-//tower_interior(watch_tower);
-create_tower(watch_tower);
-//dice_door_test_model(watch_tower, z_cut=20);
-//translate([0,0,-5]) back_door_panel(watch_tower, [1.8, 26.3, 49]);
+// todo: margin shouldn't be needed for centering multiple windows with even spacing
+aerie_tower_openings = arrange_openings(tiers=4, sides=6, y0=-0.90,
+    functors = [
+        define_door(sides=[0], size=[0.8,1.2]),
+        define_arch_windows(sides=[1,5], tiers=[0], size=[0.35,0.6], count=2, dy=0.15, margin=-0.2),
+        define_arch_windows(sides=[0,1,2,3,4,5], tiers=[1,2,3], size=[0.35,0.84], count=2, dy=0.03, margin=-0.2)]);
+
+aerie_tower = define_tower(h=150, r=35, sides=6, center_radius=3,
+    entrance=define_entrance(type="funnel", extension=0, relative_size=0.5, h=10, wall_height=5,
+        crenulation_height=0, circular=false, support_type="basic", support_count=6),
+    exit = define_exit(type="circular", steps=12, h=26),
+    baffle = define_interrupter_baffle(tiers=4, zmin=13.5, zmax=113.5, column_radius=3, count_per_level=3,
+            top_gap=CLEARANCE),
+    windows = aerie_tower_openings);
+
+//create_tower(aerie_tower);
+//tower_interior(aerie_tower);
+//exit_test_model(aerie_tower, slice=true, z_offset=42, angle=30) {
+//    rotate([0,0,120]) create_tower(aerie_tower);
+//}
+//translate([18,0,16]) d20();
+
+//stepped_cone(r0=50, r1=10, h= 30, steps=5);
+//create_tray(tower=watch_tower, length=158, h=20, back_door=false);
+//back_door_panel(watch_tower, [1.8, 26.3, 69]);
 //exit_test_model(watch_tower);
-//create_tray(tower=portable_tower, length=60, h=5);
-//create_entrance(watch_tower);
+
+
 //mini_tower = define_tower(h=100, r=15, sides=4, center_radius=0,
 //    entrance=undef,
 //    exit = define_exit(type="circular", steps=8),
